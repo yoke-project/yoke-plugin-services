@@ -8,4 +8,4 @@ units:
     kind: plugin
     plugin: com.yoke.services
     exec: components/plugins/services
-    digest: sha256:235a59eb3cb29b032da7c6389dfe616e6bbf634f7ef8f22fbb5502a849893a2f
+    digest: sha256:ed5ad3454c8587dcdfe68d190fefb4ed06c5de99b71fce7ac21a4af57bae0d1a

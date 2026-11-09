@@ -232,6 +232,11 @@ impl ServiceBackend for SystemdBackend {
         self.call_interactive::<_, ()>("Reload", &()).await
     }
 
+    async fn reset_failed(&self, name: &str) -> Result<()> {
+        validate_unit_name(name)?;
+        self.call_interactive::<_, ()>("ResetFailedUnit", &(name,)).await
+    }
+
     async fn ping(&self) -> Result<()> {
         self.manager.get_property::<String>("Version").await.map(|_| ()).map_err(|e| map_err(e.into()))
     }

@@ -1,6 +1,9 @@
 manifest: 1
 id: com.yoke.services
 protocol: 1
+streams:
+  - id: services.changes
+    tolerates_loss: true
 commands:
   - id: services.start
   - id: services.stop
@@ -11,6 +14,7 @@ commands:
   - id: services.mask
   - id: services.unmask
   - id: services.reload-daemon
+  - id: services.reset-failed
   - id: services.user.start
   - id: services.user.stop
   - id: services.user.restart
@@ -20,10 +24,15 @@ commands:
   - id: services.user.mask
   - id: services.user.unmask
   - id: services.user.reload-daemon
+  - id: services.user.reset-failed
 queries:
   - id: services.list
   - id: services.show
   - id: services.permissions
+  - id: services.failed
+occurrences:
+  - id: services.unit.failed
+  - id: services.job.finished
 capabilities:
   - name: query.services.list.answer
     governs:
@@ -34,6 +43,9 @@ capabilities:
   - name: query.services.permissions.answer
     governs:
       query: services.permissions
+  - name: query.services.failed.answer
+    governs:
+      query: services.failed
   - name: command.services.start.accept
     governs:
       command: services.start
@@ -61,6 +73,9 @@ capabilities:
   - name: command.services.reload-daemon.accept
     governs:
       command: services.reload-daemon
+  - name: command.services.reset-failed.accept
+    governs:
+      command: services.reset-failed
   - name: command.services.user.start.accept
     governs:
       command: services.user.start
@@ -88,3 +103,15 @@ capabilities:
   - name: command.services.user.reload-daemon.accept
     governs:
       command: services.user.reload-daemon
+  - name: command.services.user.reset-failed.accept
+    governs:
+      command: services.user.reset-failed
+  - name: stream.services.changes.publish
+    governs:
+      stream: services.changes
+  - name: event.services.unit.failed.report
+    governs:
+      occurrence: services.unit.failed
+  - name: event.services.job.finished.report
+    governs:
+      occurrence: services.job.finished

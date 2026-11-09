@@ -251,12 +251,13 @@ fn reading_and_acting_are_granted_apart_and_each_manager_apart() {
     for c in &d.capabilities {
         let query = d.queries.iter().any(|q| c.name == format!("query.{q}.answer"));
         let command = d.commands.iter().any(|k| c.name == format!("command.{k}.accept"));
-        assert!(query || command, "{} is named for neither a question nor a command", c.name);
+        let other = c.name.starts_with("stream.") || c.name.starts_with("event.");
+        assert!(query || command || other, "{} is named for nothing declared", c.name);
     }
     for k in services_core::plugin::COMMANDS {
         assert!(d.commands.contains(&k.to_string()) && d.commands.contains(&user(k)), "{k} is not declared for both managers");
     }
-    assert_eq!(d.capabilities.len(), d.queries.len() + d.commands.len());
+    assert_eq!(d.capabilities.len(), d.queries.len() + d.commands.len() + d.streams.len() + d.occurrences.len());
 }
 
 #[tokio::test]

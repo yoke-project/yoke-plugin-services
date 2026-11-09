@@ -33,6 +33,12 @@ async fn main() {
     // Which units commands may act on: the application's arguments.
     let policy = services_core::plugin::Policy::from_args(std::env::args().skip(1));
     let backends = Arc::new(Backends::new(backend).with_policy(policy));
+    // What the system manager says: a failed unit is reported, every change streamed while the stream flows.
+    let mut said = match &backends.system {
+        Ok(b) => Some(b.subscribe()),
+        Err(_) => None,
+    };
+    let mut streaming = false;
     // The health follows the system manager: asked every 30 s, said again only when it changes.
     let mut answering = grade == 0;
     let mut watch = tokio::time::interval(std::time::Duration::from_secs(30));
@@ -43,6 +49,8 @@ async fn main() {
         tokio::select! {
             event = unit.next() => match event {
                 None | Some(Event::Ended(_)) => return,
+                Some(Event::Activated(a)) if a.stream == services_core::plugin::CHANGES => streaming = true,
+                Some(Event::Stopped { stream }) if stream == services_core::plugin::CHANGES => streaming = false,
                 // Each on its own task: a job that takes its time holds no other question or command.
                 Some(event) => {
                     let (unit, backends) = (unit.clone(), backends.clone());
@@ -51,6 +59,13 @@ async fn main() {
                             eprintln!("services: {err}");
                         }
                     });
+                }
+            },
+            ev = async { match said.as_mut() { Some(rx) => rx.recv().await.ok(), None => std::future::pending().await } } => {
+                if let Some(ev) = ev {
+                    if let Err(err) = services_core::plugin::on_manager_event(unit.as_ref(), &ev, "system", streaming).await {
+                        eprintln!("services: {err}");
+                    }
                 }
             },
             _ = watch.tick() => {

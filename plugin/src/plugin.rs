@@ -20,7 +20,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::OnceCell;
-use yoke_sdk::plugin::{Capability, Command, Declaration, Event, Object, Outcome, Question, Unit};
+use yoke_sdk::plugin::{Capability, Command, Declaration, Event, Object, Outcome, Question, Severity, Stream, Unit};
 
 use crate::{Error, Scope, ServiceBackend, detect_backend};
 
@@ -31,7 +31,17 @@ pub const LIST: &str = "services.list";
 pub const SHOW: &str = "services.show";
 /// What this process may do with the manager (polkit).
 pub const PERMISSIONS: &str = "services.permissions";
-pub const QUERIES: [&str; 3] = [LIST, SHOW, PERMISSIONS];
+/// The units whose last run failed.
+pub const FAILED: &str = "services.failed";
+pub const QUERIES: [&str; 4] = [LIST, SHOW, PERMISSIONS, FAILED];
+/// Every change of a unit's state, while the stream flows.
+pub const CHANGES: &str = "services.changes";
+/// A unit entered the failed state.
+pub const UNIT_FAILED: &str = "services.unit.failed";
+/// A job acknowledged as still running finished.
+pub const JOB_FINISHED: &str = "services.job.finished";
+/// The format every streamed change states as `schema`.
+pub const SCHEMA: u32 = 1;
 
 pub const START: &str = "services.start";
 pub const STOP: &str = "services.stop";
@@ -42,7 +52,8 @@ pub const DISABLE: &str = "services.disable";
 pub const MASK: &str = "services.mask";
 pub const UNMASK: &str = "services.unmask";
 pub const RELOAD_DAEMON: &str = "services.reload-daemon";
-pub const COMMANDS: [&str; 9] = [START, STOP, RESTART, RELOAD, ENABLE, DISABLE, MASK, UNMASK, RELOAD_DAEMON];
+pub const RESET_FAILED: &str = "services.reset-failed";
+pub const COMMANDS: [&str; 10] = [START, STOP, RESTART, RELOAD, ENABLE, DISABLE, MASK, UNMASK, RELOAD_DAEMON, RESET_FAILED];
 
 /// No answer is larger than this; a list that would be is cut, and says so.
 pub const MAX_ANSWER: usize = 1024 * 1024;
@@ -65,10 +76,20 @@ pub fn declaration() -> Declaration {
     let answer = |q: &&str| Capability { name: format!("query.{q}.answer"), governs: Object::Query(q.to_string()) };
     let accept = |c: &String| Capability { name: format!("command.{c}.accept"), governs: Object::Command(c.clone()) };
     let commands = commands();
+    let occurrences = [UNIT_FAILED, JOB_FINISHED];
+    let report = |o: &&str| Capability { name: format!("event.{o}.report"), governs: Object::Occurrence(o.to_string()) };
     Declaration {
         id: PLUGIN.into(),
         queries: QUERIES.iter().map(|q| q.to_string()).collect(),
-        capabilities: QUERIES.iter().map(answer).chain(commands.iter().map(accept)).collect(),
+        streams: vec![Stream { id: CHANGES.into(), tolerates_loss: true, tolerates_reorder: false }],
+        occurrences: occurrences.iter().map(|o| o.to_string()).collect(),
+        capabilities: QUERIES
+            .iter()
+            .map(answer)
+            .chain(commands.iter().map(accept))
+            .chain(std::iter::once(Capability { name: format!("stream.{CHANGES}.publish"), governs: Object::Stream(CHANGES.into()) }))
+            .chain(occurrences.iter().map(report))
+            .collect(),
         commands,
         ..Default::default()
     }
@@ -189,6 +210,9 @@ pub struct ListInput {
     /// "active", "inactive", "failed", ...
     pub state: Option<String>,
     pub scope: ScopeName,
+    /// Where the page starts, and how many units it holds at most.
+    pub offset: usize,
+    pub limit: Option<usize>,
 }
 
 /// Payload of `services.show`.
@@ -224,6 +248,12 @@ pub struct ScopeInput {
 pub trait Acts {
     fn answer(&self, q: &Question, payload: Vec<u8>) -> impl Future<Output = Result<(), yoke_sdk::base::Error>>;
     fn ack(&self, c: &Command, outcome: Outcome, line: &str) -> impl Future<Output = Result<(), yoke_sdk::base::Error>>;
+    fn report(&self, _occurrence: &str, _severity: u8, _line: &str) -> impl Future<Output = Result<(), yoke_sdk::base::Error>> {
+        async { Ok(()) }
+    }
+    fn emit(&self, _stream: &str, _payload: Vec<u8>) -> impl Future<Output = Result<(), yoke_sdk::base::Error>> {
+        async { Ok(()) }
+    }
 }
 
 impl Acts for Unit {
@@ -233,6 +263,32 @@ impl Acts for Unit {
     async fn ack(&self, c: &Command, outcome: Outcome, line: &str) -> Result<(), yoke_sdk::base::Error> {
         Unit::ack(self, c, outcome, line).await
     }
+    async fn report(&self, occurrence: &str, severity: u8, line: &str) -> Result<(), yoke_sdk::base::Error> {
+        Unit::report(self, occurrence, Some(Severity::of(severity)), line, Vec::new()).await
+    }
+    async fn emit(&self, stream: &str, payload: Vec<u8>) -> Result<(), yoke_sdk::base::Error> {
+        Unit::emit(self, stream, payload).await
+    }
+}
+
+/// What one event of a manager becomes: a unit entering the failed state is reported, and any change of
+/// state is streamed while the stream flows.
+pub async fn on_manager_event(u: &impl Acts, ev: &crate::Event, scope: &str, streaming: bool) -> Result<(), yoke_sdk::base::Error> {
+    let crate::Event::UnitChanged { unit, active_state, sub_state, .. } = ev else {
+        return Ok(());
+    };
+    if active_state.is_none() && sub_state.is_none() {
+        return Ok(());
+    }
+    let mut first = Ok(());
+    if active_state.as_deref() == Some("failed") {
+        first = u.report(UNIT_FAILED, 50, &format!("{unit} failed ({scope} manager)")).await;
+    }
+    if streaming {
+        let change = json!({ "schema": SCHEMA, "scope": scope, "unit": unit, "active_state": active_state, "sub_state": sub_state });
+        first = first.and(u.emit(CHANGES, change.to_string().into_bytes()).await);
+    }
+    first
 }
 
 /// Does what one event of the Session asks: a declared question is answered and a declared command
@@ -244,12 +300,19 @@ pub async fn handle(u: &impl Acts, event: &Event, b: &Backends) -> Result<(), yo
             u.answer(q, answer).await
         }
         Event::Command(c) if commands().contains(&c.r#type) => {
-            match tokio::time::timeout(COMMAND_WAIT, act(&c.r#type, &c.payload, b)).await {
+            let job = act(&c.r#type, &c.payload, b);
+            tokio::pin!(job);
+            match tokio::time::timeout(COMMAND_WAIT, &mut job).await {
                 Ok(Ok(line)) => u.ack(c, Outcome::Done, &line).await,
                 Ok(Err(e)) => u.ack(c, Outcome::Failed, &format!("{}: {}", code(&e), detail(&e))).await,
                 Err(_) => {
-                    let line = format!("still running after {} s: the manager finishes it on its own", COMMAND_WAIT.as_secs());
-                    u.ack(c, Outcome::Accepted, &line).await
+                    let line = format!("still running after {} s: services.job.finished says how it ends", COMMAND_WAIT.as_secs());
+                    u.ack(c, Outcome::Accepted, &line).await?;
+                    // The acknowledgement is the Core's answer; how the job ends is reported when it does.
+                    match job.await {
+                        Ok(line) => u.report(JOB_FINISHED, 10, &line).await,
+                        Err(e) => u.report(JOB_FINISHED, 50, &format!("{}: {}", code(&e), detail(&e))).await,
+                    }
                 }
             }
         }
@@ -277,6 +340,17 @@ pub async fn answer(query: &str, payload: &[u8], backends: &Backends) -> Result<
                 .filter(|u| input.kind.as_ref().is_none_or(|k| *k == u.kind))
                 .filter(|u| input.state.as_ref().is_none_or(|s| *s == u.active_state))
                 .collect();
+            let total = units.len();
+            let page: Vec<_> = units.into_iter().skip(input.offset).take(input.limit.unwrap_or(usize::MAX)).collect();
+            let (items, truncated) = fit(&page, MAX_ANSWER - 1024);
+            let end = input.offset + items.len();
+            let next = (end < total).then_some(end);
+            json!({ "scope": b.scope(), "total": total, "offset": input.offset, "next": next, "truncated": truncated, "units": items })
+        }
+        FAILED => {
+            let input: ScopeInput = input(payload)?;
+            let b = manager(backends.get(input.scope).await)?;
+            let units: Vec<_> = b.list_units().await?.into_iter().filter(|u| u.active_state == "failed").collect();
             let (items, truncated) = fit(&units, MAX_ANSWER - 1024);
             json!({ "scope": b.scope(), "total": units.len(), "truncated": truncated, "units": items })
         }
@@ -327,6 +401,7 @@ pub async fn act(command: &str, payload: &[u8], backends: &Backends) -> Result<S
         DISABLE => b.disable(name, input.now).await.map(|_| format!("{name} disabled{now}")),
         MASK => b.mask(name).await.map(|_| format!("{name} masked")),
         UNMASK => b.unmask(name).await.map(|_| format!("{name} unmasked")),
+        RESET_FAILED => b.reset_failed(name).await.map(|_| format!("{name} reset")),
         other => return Err(Error::Invalid(format!("{other} is not a command of {PLUGIN}"))),
     }?;
     Ok(format!("{done} ({} manager)", scope_str(scope)))

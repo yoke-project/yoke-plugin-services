@@ -70,6 +70,10 @@ pub trait ServiceBackend: Send + Sync + 'static {
     async fn reload_daemon(&self) -> Result<()>;
 
     async fn permissions(&self) -> Result<Vec<Permission>>;
+    /// Forgets that a unit failed, as `systemctl reset-failed` does.
+    async fn reset_failed(&self, _name: &str) -> Result<()> {
+        Err(Error::Unsupported("reset-failed"))
+    }
     /// Whether the manager still answers.
     async fn ping(&self) -> Result<()> {
         Ok(())
