@@ -1,0 +1,38 @@
+# The watch: this Plugin against what Yoke last published, every day and whenever a release starts it. Its
+# record is what the project's daily report reads, apart from anything that blocks a release.
+name: watch
+
+on:
+  schedule:
+    - cron: '30 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  watch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - uses: dtolnay/rust-toolchain@stable
+      - run: bash ci/watch.sh .results
+      - name: the record
+        if: always()
+        run: |
+          go install github.com/yoke-project/yoke/cmd/yoke-verify@latest
+          "$(go env GOPATH)/bin/yoke-verify" record --level L3 --tier pool \
+            --repository "${GITHUB_REPOSITORY#*/}" \
+            --environment architecture=amd64 \
+            --started "$(cat .results/started)" --finished "$(cat .results/finished)" \
+            --ran "yoke=$(cat .results/release 2>/dev/null || echo unknown)" \
+            --results .results/checks.txt . > record-L3.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: record-L3
+          path: record-L3.json
