@@ -1,0 +1,9 @@
+plugin: 1
+id: com.yoke.services
+language: rust
+program: services
+manifest: plugin/com.yoke.services.yaml
+build:
+  in: plugin/
+  run: cargo build --release --target "$YOKE_RUST_TARGET" && cp "target/$YOKE_RUST_TARGET/release/services" "$YOKE_OUT/services"
+architectures: [x86_64, aarch64]

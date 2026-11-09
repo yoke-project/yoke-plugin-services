@@ -1,0 +1,54 @@
+manifest: 1
+id: com.yoke.services
+protocol: 1
+commands:
+  - id: services.start
+  - id: services.stop
+  - id: services.restart
+  - id: services.reload
+  - id: services.enable
+  - id: services.disable
+  - id: services.mask
+  - id: services.unmask
+  - id: services.reload-daemon
+queries:
+  - id: services.list
+  - id: services.show
+  - id: services.permissions
+capabilities:
+  - name: command.services.list.answer
+    governs:
+      query: services.list
+  - name: command.services.show.answer
+    governs:
+      query: services.show
+  - name: command.services.permissions.answer
+    governs:
+      query: services.permissions
+  - name: command.services.start.accept
+    governs:
+      command: services.start
+  - name: command.services.stop.accept
+    governs:
+      command: services.stop
+  - name: command.services.restart.accept
+    governs:
+      command: services.restart
+  - name: command.services.reload.accept
+    governs:
+      command: services.reload
+  - name: command.services.enable.accept
+    governs:
+      command: services.enable
+  - name: command.services.disable.accept
+    governs:
+      command: services.disable
+  - name: command.services.mask.accept
+    governs:
+      command: services.mask
+  - name: command.services.unmask.accept
+    governs:
+      command: services.unmask
+  - name: command.services.reload-daemon.accept
+    governs:
+      command: services.reload-daemon

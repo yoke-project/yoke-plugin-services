@@ -1,0 +1,11 @@
+model: 1
+id: com.yoke.services-try
+version: 0.1.0
+arch: x86_64
+core: ">=0.12.0"
+units:
+  services:
+    kind: plugin
+    plugin: com.yoke.services
+    exec: components/plugins/services
+    digest: sha256:fa5b96d221d573ab88759df7405d69d34cd973c9f455b7bcfc256c44ebb719bc

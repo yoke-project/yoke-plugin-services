@@ -1,0 +1,8 @@
+plugins:
+  - id: com.yoke.services
+    unit: services
+    source: ..
+    tag: null
+    arch: x86_64
+    digest: sha256:fa5b96d221d573ab88759df7405d69d34cd973c9f455b7bcfc256c44ebb719bc
+    taken: 2026-11-09T21:08:22Z

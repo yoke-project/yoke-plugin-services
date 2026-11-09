@@ -1,0 +1,21 @@
+# The Manifest kept in plugin/ is what the program prints: built natively and asked, at every change.
+name: manifest
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  manifest:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: the Manifest kept is the Manifest printed
+        working-directory: plugin
+        run: |
+          cargo build --release
+          target/release/services --manifest | diff -u com.yoke.services.yaml -
+      - name: the tests
+        working-directory: plugin
+        run: cargo test
