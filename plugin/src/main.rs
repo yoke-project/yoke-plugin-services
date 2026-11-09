@@ -30,7 +30,13 @@ async fn main() {
     if let Err(err) = unit.health(grade, &line).await {
         eprintln!("services: {err}");
     }
-    let backends = Arc::new(Backends::new(backend));
+    // Which units commands may act on: the application's arguments.
+    let policy = services_core::plugin::Policy::from_args(std::env::args().skip(1));
+    let backends = Arc::new(Backends::new(backend).with_policy(policy));
+    // The health follows the system manager: asked every 30 s, said again only when it changes.
+    let mut answering = grade == 0;
+    let mut watch = tokio::time::interval(std::time::Duration::from_secs(30));
+    watch.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .expect("services listens for SIGTERM");
     loop {
@@ -45,6 +51,19 @@ async fn main() {
                             eprintln!("services: {err}");
                         }
                     });
+                }
+            },
+            _ = watch.tick() => {
+                let now = match &backends.system {
+                    Ok(b) => b.ping().await.is_ok(),
+                    Err(_) => false,
+                };
+                if now != answering {
+                    answering = now;
+                    let (grade, line) = if now { (0, "the system manager answers again") } else { (50, "the system manager does not answer") };
+                    if let Err(err) = unit.health(grade, line).await {
+                        eprintln!("services: {err}");
+                    }
                 }
             },
             _ = term.recv() => {

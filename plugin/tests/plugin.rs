@@ -4,7 +4,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use services_core::plugin::{
-    Acts, Backend, Backends, ENABLE, LIST, PERMISSIONS, RELOAD_DAEMON, SHOW, START, STOP, declaration, handle,
+    Acts, Backend, Backends, ENABLE, LIST, PERMISSIONS, Policy, RELOAD_DAEMON, SHOW, START, STOP, declaration, handle,
+    user,
 };
 use services_core::{Error, Event as ManagerEvent, Permission, Scope, ServiceBackend, UnitDetails, UnitInfo};
 use tokio::sync::broadcast;
@@ -208,7 +209,7 @@ async fn a_command_is_carried_out_and_acknowledged_done() {
     let b = fake();
     assert_eq!(tell(&b, START, r#"{"unit":"sshd.service"}"#).await, [("Done".into(), "sshd.service started (system manager)".into())]);
     assert_eq!(
-        tell(&b, ENABLE, r#"{"unit":"t.timer","now":true,"scope":"user"}"#).await,
+        tell(&b, &user(ENABLE), r#"{"unit":"t.timer","now":true}"#).await,
         [("Done".into(), "t.timer enabled now (user manager)".into())]
     );
     assert_eq!(tell(&b, RELOAD_DAEMON, "").await[0].0, "Done");
@@ -243,3 +244,45 @@ async fn an_undeclared_question_or_command_is_left_alone() {
     handle(&rec, &Event::Stopped { stream: "x".into() }, &fake()).await.unwrap();
     assert!(rec.0.borrow().is_empty());
 }
+
+#[test]
+fn reading_and_acting_are_granted_apart_and_each_manager_apart() {
+    let d = declaration();
+    for c in &d.capabilities {
+        let query = d.queries.iter().any(|q| c.name == format!("query.{q}.answer"));
+        let command = d.commands.iter().any(|k| c.name == format!("command.{k}.accept"));
+        assert!(query || command, "{} is named for neither a question nor a command", c.name);
+    }
+    for k in services_core::plugin::COMMANDS {
+        assert!(d.commands.contains(&k.to_string()) && d.commands.contains(&user(k)), "{k} is not declared for both managers");
+    }
+    assert_eq!(d.capabilities.len(), d.queries.len() + d.commands.len());
+}
+
+#[tokio::test]
+async fn a_command_names_its_manager_by_its_type_and_not_by_its_payload() {
+    let b = fake();
+    assert_eq!(tell(&b, &user(STOP), r#"{"unit":"t.timer"}"#).await[0].1, "t.timer stopped (user manager)");
+    assert!(tell(&b, STOP, r#"{"unit":"t.timer","scope":"user"}"#).await[0].1.starts_with("invalid: "));
+}
+
+#[tokio::test]
+async fn the_core_running_the_plugin_is_protected_by_default() {
+    let b = fake();
+    for (kind, unit) in [(STOP.to_string(), "yoke.service"), (STOP.to_string(), "yoke-guardian.service"), (user(STOP), "yoke.service")] {
+        let got = tell(&b, &kind, &format!(r#"{{"unit":"{unit}"}}"#)).await;
+        assert_eq!(got[0].0, "Failed", "{kind} {unit}");
+        assert!(got[0].1.starts_with("protected: "), "{}", got[0].1);
+    }
+}
+
+#[tokio::test]
+async fn only_what_the_application_allows_is_acted_on() {
+    let policy = Policy::from_args(["--allow", "sshd.service", "--protect", "cups.*"].map(String::from));
+    let b = fake().with_policy(policy);
+    assert_eq!(tell(&b, START, r#"{"unit":"sshd.service"}"#).await[0].0, "Done");
+    assert!(tell(&b, START, r#"{"unit":"backup.timer"}"#).await[0].1.starts_with("not_allowed: "));
+    assert!(tell(&b, START, r#"{"unit":"cups.service"}"#).await[0].1.starts_with("protected: "));
+    assert_eq!(ask(&b, SHOW, r#"{"unit":"sshd.service"}"#).await[0]["name"], "sshd.service", "reading stays free");
+}
+

@@ -36,6 +36,10 @@ pub enum Error {
     JobTimeout(String),
     #[error("{0}")]
     Backend(String),
+    #[error("{0} is protected")]
+    Protected(String),
+    #[error("{0} is not allowed")]
+    NotAllowed(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -66,6 +70,10 @@ pub trait ServiceBackend: Send + Sync + 'static {
     async fn reload_daemon(&self) -> Result<()>;
 
     async fn permissions(&self) -> Result<Vec<Permission>>;
+    /// Whether the manager still answers.
+    async fn ping(&self) -> Result<()> {
+        Ok(())
+    }
     fn subscribe(&self) -> broadcast::Receiver<Event>;
 }
 

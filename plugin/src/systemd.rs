@@ -8,7 +8,6 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 use tokio::sync::broadcast;
 use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
-use zbus::proxy::MethodFlags;
 use zbus::{Connection, MatchRule, MessageStream, Proxy};
 
 use crate::{Error, Event, Permission, Result, Scope, ServiceBackend, UnitDetails, UnitInfo};
@@ -91,16 +90,15 @@ impl SystemdBackend {
         p.call("GetAll", &(iface,)).await.ok()
     }
 
-    /// Calls a state-changing method asking polkit to authenticate the user interactively
-    /// when needed (an agent shows the password prompt). Without an agent, or on a
-    /// headless system, this ends in `PermissionDenied`.
+    /// Calls a state-changing method without interactive authentication: a Plugin has nobody in front of it,
+    /// so what polkit does not allow outright is `PermissionDenied`.
     async fn call_interactive<B, R>(&self, method: &str, body: &B) -> Result<R>
     where
         B: serde::Serialize + zbus::zvariant::DynamicType,
         R: for<'d> zbus::zvariant::DynamicDeserialize<'d>,
     {
         self.manager
-            .call_with_flags::<_, _, R>(method, MethodFlags::AllowInteractiveAuth.into(), body)
+            .call_with_flags::<_, _, R>(method, Default::default(), body)
             .await
             .map_err(map_err)?
             .ok_or_else(|| Error::Backend(format!("{method}: empty reply")))
@@ -232,6 +230,10 @@ impl ServiceBackend for SystemdBackend {
 
     async fn reload_daemon(&self) -> Result<()> {
         self.call_interactive::<_, ()>("Reload", &()).await
+    }
+
+    async fn ping(&self) -> Result<()> {
+        self.manager.get_property::<String>("Version").await.map(|_| ()).map_err(|e| map_err(e.into()))
     }
 
     async fn permissions(&self) -> Result<Vec<Permission>> {

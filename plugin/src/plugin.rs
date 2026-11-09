@@ -7,8 +7,11 @@
 //!   would otherwise wait for an answer that never comes.
 //! - Every declared command is acknowledged: `Done` when the job finished, `Failed` with `<code>: <message>`,
 //!   or `Accepted` when the job is still running after [`COMMAND_WAIT`] (the Core waits 30 s, a job up to 90).
-//! - Every payload may name the manager, `"scope": "system"` (the default) or `"user"` (the account's own
-//!   `systemd --user`, where nothing needs polkit: what the tests act on).
+//! - A question's payload may name the manager, `"scope": "system"` (the default) or `"user"` (the account's
+//!   own `systemd --user`). A command names it by its type: `services.<verb>` acts on the system manager and
+//!   `services.user.<verb>` on the user's, so that an operator can grant one without the other.
+//! - A unit the application protects is never acted on, and `yoke*.service` always is protected: the Plugin
+//!   cannot stop the Core running it. Where the application names units it allows, no other is acted on.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -46,17 +49,92 @@ pub const MAX_ANSWER: usize = 1024 * 1024;
 /// How long a command waits for its job before acknowledging it as accepted and still running.
 pub const COMMAND_WAIT: Duration = Duration::from_secs(25);
 
-/// One capability per question and per command: an operator may grant reading and withhold acting.
+/// A command's type on the user's manager: `services.start` becomes `services.user.start`.
+pub fn user(command: &str) -> String {
+    command.replacen("services.", "services.user.", 1)
+}
+
+/// Every command type, on the system manager then on the user's.
+pub fn commands() -> Vec<String> {
+    COMMANDS.iter().map(|c| c.to_string()).chain(COMMANDS.iter().map(|c| user(c))).collect()
+}
+
+/// One capability per question and per command on each manager: an operator may grant reading and withhold
+/// acting, and grant acting on the user's manager and withhold it on the system's.
 pub fn declaration() -> Declaration {
-    let answer = |q: &&str| Capability { name: format!("command.{q}.answer"), governs: Object::Query(q.to_string()) };
-    let accept = |c: &&str| Capability { name: format!("command.{c}.accept"), governs: Object::Command(c.to_string()) };
+    let answer = |q: &&str| Capability { name: format!("query.{q}.answer"), governs: Object::Query(q.to_string()) };
+    let accept = |c: &String| Capability { name: format!("command.{c}.accept"), governs: Object::Command(c.clone()) };
+    let commands = commands();
     Declaration {
         id: PLUGIN.into(),
         queries: QUERIES.iter().map(|q| q.to_string()).collect(),
-        commands: COMMANDS.iter().map(|c| c.to_string()).collect(),
-        capabilities: QUERIES.iter().map(answer).chain(COMMANDS.iter().map(accept)).collect(),
+        capabilities: QUERIES.iter().map(answer).chain(commands.iter().map(accept)).collect(),
+        commands,
         ..Default::default()
     }
+}
+
+/// Which units a command may act on: the application's arguments, `--allow <pattern>` and
+/// `--protect <pattern>`, each as many times as needed, `*` matching any run of characters.
+#[derive(Debug, Clone)]
+pub struct Policy {
+    allow: Vec<String>,
+    protect: Vec<String>,
+}
+
+/// What is protected whatever the application says: the Core and its guardian.
+pub const ALWAYS_PROTECTED: &str = "yoke*.service";
+
+impl Default for Policy {
+    fn default() -> Self {
+        Policy { allow: Vec::new(), protect: vec![ALWAYS_PROTECTED.into()] }
+    }
+}
+
+impl Policy {
+    pub fn from_args(args: impl IntoIterator<Item = String>) -> Self {
+        let mut p = Policy::default();
+        let mut args = args.into_iter();
+        while let Some(a) = args.next() {
+            match a.as_str() {
+                "--allow" => p.allow.extend(args.next()),
+                "--protect" => p.protect.extend(args.next()),
+                _ => {}
+            }
+        }
+        p
+    }
+
+    /// Why the unit may not be acted on, or nothing.
+    pub fn refuses(&self, unit: &str) -> Option<Error> {
+        if self.protect.iter().any(|p| matches(p, unit)) {
+            return Some(Error::Protected(unit.to_string()));
+        }
+        if !self.allow.is_empty() && !self.allow.iter().any(|p| matches(p, unit)) {
+            return Some(Error::NotAllowed(unit.to_string()));
+        }
+        None
+    }
+}
+
+/// Whether name matches pattern, `*` standing for any run of characters.
+fn matches(pattern: &str, name: &str) -> bool {
+    let parts: Vec<&str> = pattern.split('*').collect();
+    if parts.len() == 1 {
+        return pattern == name;
+    }
+    let (first, last) = (parts[0], parts[parts.len() - 1]);
+    if !name.starts_with(first) || !name.ends_with(last) || name.len() < first.len() + last.len() {
+        return false;
+    }
+    let mut rest = &name[first.len()..name.len() - last.len()];
+    for part in &parts[1..parts.len() - 1] {
+        match rest.find(part) {
+            Some(i) => rest = &rest[i + part.len()..],
+            None => return false,
+        }
+    }
+    true
 }
 
 /// A manager, or why there is none.
@@ -67,16 +145,23 @@ pub type Backend = Result<Arc<dyn ServiceBackend>, Error>;
 pub struct Backends {
     pub system: Backend,
     pub user: OnceCell<Backend>,
+    pub policy: Policy,
 }
 
 impl Backends {
     pub fn new(system: Backend) -> Self {
-        Self { system, user: OnceCell::new() }
+        Self { system, user: OnceCell::new(), policy: Policy::default() }
     }
 
     /// Both given, for tests.
     pub fn with_user(system: Backend, user: Backend) -> Self {
-        Self { system, user: OnceCell::new_with(Some(user)) }
+        Self { system, user: OnceCell::new_with(Some(user)), policy: Policy::default() }
+    }
+
+    /// The same managers, acting under the policy given.
+    pub fn with_policy(mut self, policy: Policy) -> Self {
+        self.policy = policy;
+        self
     }
 
     pub async fn get(&self, scope: ScopeName) -> &Backend {
@@ -106,14 +191,26 @@ pub struct ListInput {
     pub scope: ScopeName,
 }
 
-/// Payload of `services.show` and of the commands on one unit.
+/// Payload of `services.show`.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct UnitInput {
     pub unit: String,
-    /// `services.enable` / `services.disable` only: start or stop it as well.
-    pub now: bool,
     pub scope: ScopeName,
+}
+
+/// Payload of `services.reload-daemon` and `services.user.reload-daemon`: nothing, the manager being the type's.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct NoInput {}
+
+/// Payload of the commands on one unit: the manager is the command's type's.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CommandInput {
+    pub unit: String,
+    /// `enable` / `disable` only: start or stop it as well.
+    pub now: bool,
 }
 
 /// Payload of `services.permissions` and `services.reload-daemon`.
@@ -146,7 +243,7 @@ pub async fn handle(u: &impl Acts, event: &Event, b: &Backends) -> Result<(), yo
             let answer = answer(&q.r#type, &q.payload, b).await.unwrap_or_else(|e| error_json(&e));
             u.answer(q, answer).await
         }
-        Event::Command(c) if COMMANDS.contains(&c.r#type.as_str()) => {
+        Event::Command(c) if commands().contains(&c.r#type) => {
             match tokio::time::timeout(COMMAND_WAIT, act(&c.r#type, &c.payload, b)).await {
                 Ok(Ok(line)) => u.ack(c, Outcome::Done, &line).await,
                 Ok(Err(e)) => u.ack(c, Outcome::Failed, &format!("{}: {}", code(&e), detail(&e))).await,
@@ -186,7 +283,7 @@ pub async fn answer(query: &str, payload: &[u8], backends: &Backends) -> Result<
         SHOW => {
             let input: UnitInput = input(payload)?;
             let b = manager(backends.get(input.scope).await)?;
-            let name = unit_name(&input)?;
+            let name = unit_name(&input.unit)?;
             let d = b.unit_details(name).await?;
             if d.load_state == "not-found" {
                 return Err(Error::NotFound(format!("no unit {name}")));
@@ -205,16 +302,23 @@ pub async fn answer(query: &str, payload: &[u8], backends: &Backends) -> Result<
 
 /// Carries out one declared command; the line says what was done.
 pub async fn act(command: &str, payload: &[u8], backends: &Backends) -> Result<String, Error> {
-    if command == RELOAD_DAEMON {
-        let input: ScopeInput = input(payload)?;
-        manager(backends.get(input.scope).await)?.reload_daemon().await?;
-        return Ok(format!("{} manager reloaded", scope_str(input.scope)));
+    let (scope, verb) = match command.strip_prefix("services.user.") {
+        Some(verb) => (ScopeName::User, format!("services.{verb}")),
+        None => (ScopeName::System, command.to_string()),
+    };
+    if verb == RELOAD_DAEMON {
+        let _: NoInput = input(payload)?;
+        manager(backends.get(scope).await)?.reload_daemon().await?;
+        return Ok(format!("{} manager reloaded", scope_str(scope)));
     }
-    let input: UnitInput = input(payload)?;
-    let b = manager(backends.get(input.scope).await)?;
-    let name = unit_name(&input)?;
+    let input: CommandInput = input(payload)?;
+    let name = unit_name(&input.unit)?;
+    if let Some(refused) = backends.policy.refuses(name) {
+        return Err(refused);
+    }
+    let b = manager(backends.get(scope).await)?;
     let now = if input.now { " now" } else { "" };
-    let done = match command {
+    let done = match verb.as_str() {
         START => b.start(name).await.map(|_| format!("{name} started")),
         STOP => b.stop(name).await.map(|_| format!("{name} stopped")),
         RESTART => b.restart(name).await.map(|_| format!("{name} restarted")),
@@ -225,7 +329,7 @@ pub async fn act(command: &str, payload: &[u8], backends: &Backends) -> Result<S
         UNMASK => b.unmask(name).await.map(|_| format!("{name} unmasked")),
         other => return Err(Error::Invalid(format!("{other} is not a command of {PLUGIN}"))),
     }?;
-    Ok(format!("{done} ({} manager)", scope_str(input.scope)))
+    Ok(format!("{done} ({} manager)", scope_str(scope)))
 }
 
 fn scope_str(s: ScopeName) -> &'static str {
@@ -235,11 +339,11 @@ fn scope_str(s: ScopeName) -> &'static str {
     }
 }
 
-fn unit_name(input: &UnitInput) -> Result<&str, Error> {
-    if input.unit.is_empty() {
+fn unit_name(unit: &str) -> Result<&str, Error> {
+    if unit.is_empty() {
         return Err(Error::Invalid("the payload names no unit: {\"unit\":\"<name>\"}".into()));
     }
-    Ok(&input.unit)
+    Ok(unit)
 }
 
 /// A payload read as JSON; an empty one is the defaults.
@@ -261,6 +365,8 @@ pub fn code(e: &Error) -> &'static str {
         Error::JobFailed { .. } => "job_failed",
         Error::JobTimeout(_) => "job_timeout",
         Error::Backend(_) => "backend",
+        Error::Protected(_) => "protected",
+        Error::NotAllowed(_) => "not_allowed",
     }
 }
 
@@ -269,6 +375,8 @@ pub fn detail(e: &Error) -> String {
     match e {
         Error::Unavailable(m) | Error::PermissionDenied(m) | Error::NotFound(m) | Error::Invalid(m) | Error::Backend(m) => m.clone(),
         Error::JobTimeout(unit) => format!("{unit} did not finish in time"),
+        Error::Protected(unit) => format!("{unit} is protected by the application, and is never acted on"),
+        Error::NotAllowed(unit) => format!("{unit} is not among the units the application allows"),
         other => other.to_string(),
     }
 }

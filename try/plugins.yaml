@@ -3,6 +3,8 @@ plugins:
     unit: services
     source: ..
     tag: null
+    commit: 954a79d0f25aadf4076ad0639a7d7407767fe48f
+    clean: false
     arch: x86_64
-    digest: sha256:fa5b96d221d573ab88759df7405d69d34cd973c9f455b7bcfc256c44ebb719bc
-    taken: 2026-11-09T21:08:22Z
+    digest: sha256:235a59eb3cb29b032da7c6389dfe616e6bbf634f7ef8f22fbb5502a849893a2f
+    taken: 2026-11-09T21:47:22Z

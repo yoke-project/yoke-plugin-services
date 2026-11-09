@@ -11,18 +11,27 @@ commands:
   - id: services.mask
   - id: services.unmask
   - id: services.reload-daemon
+  - id: services.user.start
+  - id: services.user.stop
+  - id: services.user.restart
+  - id: services.user.reload
+  - id: services.user.enable
+  - id: services.user.disable
+  - id: services.user.mask
+  - id: services.user.unmask
+  - id: services.user.reload-daemon
 queries:
   - id: services.list
   - id: services.show
   - id: services.permissions
 capabilities:
-  - name: command.services.list.answer
+  - name: query.services.list.answer
     governs:
       query: services.list
-  - name: command.services.show.answer
+  - name: query.services.show.answer
     governs:
       query: services.show
-  - name: command.services.permissions.answer
+  - name: query.services.permissions.answer
     governs:
       query: services.permissions
   - name: command.services.start.accept
@@ -52,3 +61,30 @@ capabilities:
   - name: command.services.reload-daemon.accept
     governs:
       command: services.reload-daemon
+  - name: command.services.user.start.accept
+    governs:
+      command: services.user.start
+  - name: command.services.user.stop.accept
+    governs:
+      command: services.user.stop
+  - name: command.services.user.restart.accept
+    governs:
+      command: services.user.restart
+  - name: command.services.user.reload.accept
+    governs:
+      command: services.user.reload
+  - name: command.services.user.enable.accept
+    governs:
+      command: services.user.enable
+  - name: command.services.user.disable.accept
+    governs:
+      command: services.user.disable
+  - name: command.services.user.mask.accept
+    governs:
+      command: services.user.mask
+  - name: command.services.user.unmask.accept
+    governs:
+      command: services.user.unmask
+  - name: command.services.user.reload-daemon.accept
+    governs:
+      command: services.user.reload-daemon
