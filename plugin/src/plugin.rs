@@ -3,8 +3,9 @@
 //! The rest of the crate talks to systemd; this module is the Plugin around it: what it declares, how a
 //! payload is read, what it answers and how a command is acknowledged.
 //!
-//! - Every declared question is answered, a failure included, as `{"error":{"code","message"}}`: the Core
-//!   would otherwise wait for an answer that never comes.
+//! - Every declared question is answered, or failed with a code and a message (`unavailable`, `not_found`,
+//!   `invalid`, …), so that whoever asked is refused rather than handed a failure as an answer, and the Core
+//!   never waits for an answer that does not come.
 //! - Every declared command is acknowledged: `Done` when the job finished, `Failed` with `<code>: <message>`,
 //!   or `Accepted` when the job is still running after [`COMMAND_WAIT`] (the Core waits 30 s, a job up to 90).
 //! - A question's payload may name the manager, `"scope": "system"` (the default) or `"user"` (the account's
@@ -247,6 +248,7 @@ pub struct ScopeInput {
 /// What the Plugin does on its Session, so a test can stand in for the Unit.
 pub trait Acts {
     fn answer(&self, q: &Question, payload: Vec<u8>) -> impl Future<Output = Result<(), yoke_sdk::base::Error>>;
+    fn fail(&self, q: &Question, code: &str, message: &str) -> impl Future<Output = Result<(), yoke_sdk::base::Error>>;
     fn ack(&self, c: &Command, outcome: Outcome, line: &str) -> impl Future<Output = Result<(), yoke_sdk::base::Error>>;
     fn report(&self, _occurrence: &str, _severity: u8, _line: &str) -> impl Future<Output = Result<(), yoke_sdk::base::Error>> {
         async { Ok(()) }
@@ -259,6 +261,9 @@ pub trait Acts {
 impl Acts for Unit {
     async fn answer(&self, q: &Question, payload: Vec<u8>) -> Result<(), yoke_sdk::base::Error> {
         Unit::answer(self, q, payload).await
+    }
+    async fn fail(&self, q: &Question, code: &str, message: &str) -> Result<(), yoke_sdk::base::Error> {
+        Unit::fail(self, &q.id, code, message).await
     }
     async fn ack(&self, c: &Command, outcome: Outcome, line: &str) -> Result<(), yoke_sdk::base::Error> {
         Unit::ack(self, c, outcome, line).await
@@ -296,8 +301,10 @@ pub async fn on_manager_event(u: &impl Acts, ev: &crate::Event, scope: &str, str
 pub async fn handle(u: &impl Acts, event: &Event, b: &Backends) -> Result<(), yoke_sdk::base::Error> {
     match event {
         Event::Question(q) if QUERIES.contains(&q.r#type.as_str()) => {
-            let answer = answer(&q.r#type, &q.payload, b).await.unwrap_or_else(|e| error_json(&e));
-            u.answer(q, answer).await
+            match answer(&q.r#type, &q.payload, b).await {
+                Ok(answer) => u.answer(q, answer).await,
+                Err(e) => u.fail(q, code(&e), &message(&e)).await,
+            }
         }
         Event::Command(c) if commands().contains(&c.r#type) => {
             let job = act(&c.r#type, &c.payload, b);
@@ -456,10 +463,9 @@ pub fn detail(e: &Error) -> String {
     }
 }
 
-/// `{"error":{"code":"<variant>","message":"..."}}`.
-pub fn error_json(e: &Error) -> Vec<u8> {
-    let message: String = e.to_string().chars().take(4096).collect();
-    json!({ "error": { "code": code(e), "message": message } }).to_string().into_bytes()
+/// The message a failed question carries: the error as it reads, no longer than 4096 characters.
+pub fn message(e: &Error) -> String {
+    e.to_string().chars().take(4096).collect()
 }
 
 /// The first items that fit in `budget` bytes of JSON, and whether any was left out.

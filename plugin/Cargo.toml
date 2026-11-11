@@ -21,7 +21,7 @@ thiserror = "1"
 tracing = "0.1"
 futures-util = "0.3"
 polkit = { path = "polkit" }
-yoke-sdk = "=0.6.1"
+yoke-sdk = "=0.7.0"
 serde_json = "1"
 
 [dev-dependencies]

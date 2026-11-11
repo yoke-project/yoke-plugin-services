@@ -107,13 +107,18 @@ impl ServiceBackend for Fake {
     }
 }
 
-/// Stands in for the Unit: records what was answered and how commands were acknowledged.
+/// Stands in for the Unit: records what was answered, a failed question as `{"failed":{"code","message"}}`,
+/// and how commands were acknowledged.
 #[derive(Default)]
 struct Recorder(RefCell<Vec<serde_json::Value>>, RefCell<Vec<(String, String)>>);
 
 impl Acts for Recorder {
     async fn answer(&self, _q: &Question, payload: Vec<u8>) -> Result<(), yoke_sdk::base::Error> {
         self.0.borrow_mut().push(serde_json::from_slice(&payload).expect("an answer is JSON"));
+        Ok(())
+    }
+    async fn fail(&self, _q: &Question, code: &str, message: &str) -> Result<(), yoke_sdk::base::Error> {
+        self.0.borrow_mut().push(serde_json::json!({ "failed": { "code": code, "message": message } }));
         Ok(())
     }
     async fn ack(&self, _c: &Command, outcome: Outcome, line: &str) -> Result<(), yoke_sdk::base::Error> {
@@ -175,25 +180,25 @@ async fn show_answers_the_details_of_one_unit() {
     let got = ask(&fake(), SHOW, r#"{"unit":"sshd.service"}"#).await;
     assert_eq!(got[0]["main_pid"], 42);
     let missing = ask(&fake(), SHOW, r#"{"unit":"nope.service"}"#).await;
-    assert_eq!(missing[0]["error"]["code"], "not_found");
+    assert_eq!(missing[0]["failed"]["code"], "not_found");
 }
 
 #[tokio::test]
-async fn failures_are_answered_as_the_error_object() {
+async fn a_failure_fails_the_question_with_its_code() {
     let denied = ask(&fake(), PERMISSIONS, "").await;
-    assert_eq!(denied[0]["error"]["code"], "permission_denied");
-    assert!(denied[0]["error"]["message"].as_str().unwrap().contains("polkit said no"));
+    assert_eq!(denied[0]["failed"]["code"], "permission_denied");
+    assert!(denied[0]["failed"]["message"].as_str().unwrap().contains("polkit said no"));
 
     for payload in ["{not json", r#"{"bogus":1}"#, "", r#"{"unit":""}"#] {
         let bad = ask(&fake(), SHOW, payload).await;
-        assert_eq!(bad[0]["error"]["code"], "invalid", "{payload}");
+        assert_eq!(bad[0]["failed"]["code"], "invalid", "{payload}");
     }
 
     let none = only(Err(Error::Unavailable("no systemd here".into())));
     let got = ask(&none, LIST, "").await;
-    assert_eq!(got[0]["error"]["code"], "unavailable");
+    assert_eq!(got[0]["failed"]["code"], "unavailable");
     let user = ask(&none, LIST, r#"{"scope":"user"}"#).await;
-    assert_eq!(user[0]["error"]["code"], "unavailable");
+    assert_eq!(user[0]["failed"]["code"], "unavailable");
 }
 
 #[tokio::test]
@@ -201,7 +206,7 @@ async fn the_scope_names_the_manager() {
     let got = ask(&fake(), LIST, r#"{"scope":"user"}"#).await;
     assert_eq!(got[0]["scope"], "user");
     let bad = ask(&fake(), LIST, r#"{"scope":"session"}"#).await;
-    assert_eq!(bad[0]["error"]["code"], "invalid");
+    assert_eq!(bad[0]["failed"]["code"], "invalid");
 }
 
 #[tokio::test]

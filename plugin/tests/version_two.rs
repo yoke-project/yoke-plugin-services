@@ -83,6 +83,10 @@ impl Acts for Rec {
         self.answered.lock().unwrap().push(serde_json::from_slice(&payload).unwrap());
         Ok(())
     }
+    async fn fail(&self, _q: &Question, code: &str, message: &str) -> Result<(), yoke_sdk::base::Error> {
+        self.answered.lock().unwrap().push(serde_json::json!({ "failed": { "code": code, "message": message } }));
+        Ok(())
+    }
     async fn ack(&self, _c: &Command, outcome: Outcome, line: &str) -> Result<(), yoke_sdk::base::Error> {
         self.acked.lock().unwrap().push((format!("{outcome:?}"), line.into()));
         Ok(())
